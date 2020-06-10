@@ -1,0 +1,161 @@
+#!/usr/local/bin/python3
+# -*- coding: utf-8 -*-
+#auth: zhangyang
+
+import time
+import os
+import grpc
+import queue
+import yaml
+import sys
+
+from locust import (
+    TaskSet, task, events, Locust, between
+    )
+from gevent._semaphore import Semaphore
+
+sys.path.append('../')
+from grpc_test import model_server_pb2
+from grpc_test import model_server_pb2_grpc
+
+global config_file
+config_file = './config/param_cfg.yaml'
+
+
+all_locusts_spawned = Semaphore()
+all_locusts_spawned.acquire()
+
+def on_hatch_complete(**kwargs):
+    all_locusts_spawned.release()
+
+events.hatch_complete += on_hatch_complete
+
+
+class GrpcClient(object):
+    """重写self.client"""
+    def __init__(self):
+        pass
+
+    def connect(self):
+        """grpc实例"""
+        self.res = model_server_pb2.ProcessResponse()
+        try:
+            # print('链接创建：{} ms'.format(time.time()*1000))
+            with open(config_file) as f:
+                cfg = yaml.safe_load(f)
+            #创建链接
+            host = cfg.get('host')
+            self.conn = grpc.insecure_channel(host)
+            self.cl = model_server_pb2_grpc.ModelServerStub(channel=self.conn)
+            
+            #参数实例
+            self.request = model_server_pb2.ProcessRequest()
+            self.request.image_base64 = cfg.get('base64_man002')
+            self.request.op = cfg.get('op')
+            # self.request.feature_models.append("did_fid_v2")
+            # self.request.feature_models.append("face_recognition_retailing_wanda_heavy_v13_caffe")
+            # self.request.feature_models.append("face_recognition_tourism_resnet_caffe_gpu_tourism_20200304_v111000_mask")
+            # self.request.feature_models.append("face_recognition_retailing_fres_caffe_gpu_didfid-mall-store_20190210_v040200_mask")
+            
+            if cfg.get('face_box'):
+                print(">> Process with FaceBox ...")
+                self.request.detectedFaceBox.left  = 162.0
+                self.request.detectedFaceBox.top   = 125.0
+                self.request.detectedFaceBox.width = 125.0
+                self.request.detectedFaceBox.height= 125.0
+                self.request.detectedFaceBox.degree= -2
+
+            #记录开始时间
+            start_time = time.time()
+            #调用
+<<<<<<< HEAD
+            self.res = self.cl.ProcessV2(self.request)
+            # self.res = self.cl.Process(self.request)    # version 1 
+            
+=======
+            self.res = self.cl.Process(self.request)
+>>>>>>> 29a0e34ed34bd98a87f3e9eb39b59206f136b269
+            total_time = int((time.time() - start_time) * 1000)
+            events.request_success.fire(
+                request_type='grpc',
+                name=r'/exec_task',
+                response_time=total_time,
+                response_length=0
+            )
+        except grpc.RpcError as rpc_error:
+            total_time = int((time.time() - start_time) * 1000)
+            events.request_failure.fire(
+                request_type='grpc',
+                name=r'fail',
+                response_time=total_time,
+                response_length=0,
+                exception=rpc_error
+            )
+
+        return self.res
+
+
+class GrpcLocust(Locust):
+    def __init__(self, *args, **kwargs):
+        super(GrpcLocust, self).__init__(*args, **kwargs)
+        self.client = GrpcClient()
+
+
+class GrpcTask(TaskSet):
+    """load test """
+    def on_start(self):
+        # pass        
+        all_locusts_spawned.wait()
+
+
+    @task
+    def exec_task(self):
+        #grpc接口响应数据
+        self.res = self.client.connect()
+
+
+class WebsiteUser(GrpcLocust):
+
+    task_set = GrpcTask
+    wait_time = between(0.001, 0.001)
+
+
+def main():
+    
+    cur_date = time.strftime('%m%d-%H%M', time.localtime())
+    log_dir = './outputs/' + 'log'+'-'+cur_date
+    os.system("mkdir -p {} &".format(log_dir))
+    print('>> directory created')
+    # Read configurations
+    with open(config_file) as f:
+        cfg = yaml.safe_load(f)
+    concur = cfg.get('concur')
+    op = cfg.get('op')
+    face_box = cfg.get('face_box')
+    duration = cfg.get('duration')
+    host = cfg.get('host')
+    print(">> Current concur: {}, box: {}, op: {}, duration: {}".format(concur, face_box, op, duration))
+    
+    #cpu memory monitor
+    os.system('python3 ./log_utils/cpumemgpu.py|tee -a ./{}/perf-{}-cc{}-box{}-op{}.txt &'.format(log_dir, cur_date,concur, int(face_box), op))
+    time.sleep(5)
+    
+    if  concur > 0:
+        os.system("locust -f {locust_file} -H {host} --master  --csv={log_path}/model-{time}-cc{cc}-box{box}-op{op} --no-web -c{cc} -r{cc} -t{duration} &".format(
+            locust_file=str(sys.argv[0]).split('/')[-1], 
+            host=host, log_path=log_dir, time=cur_date, 
+            cc=concur, box=int(face_box), op=op, duration=duration))
+        for i in range(concur):
+            os.system("locust -f {} --slave &".format(str(sys.argv[0]).split('/')[-1]))  
+    else:
+        print("并发数不能 <= 0 ")
+    
+    time.sleep(2)
+    os._exit(0)
+
+if __name__ == "__main__":
+    """
+    Set up param_cfg.yaml first
+    >> example: nuhup python3 stability_server.py &
+    """
+    main()
